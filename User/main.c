@@ -1,221 +1,280 @@
-/*
- *  Author:曹瑞泽
- *  Data:2023.6/7
- *  四川大学 2020级
- *
- * */
-
-#include "Wheel_Speed_Control.h"
-#include "debug.h"
-#include "GPIO_Init.h"
-#include "OLED.h"
-#include "Serial.h"
-#include "IMU_Driver.h"
-#include "Bluetooth.h"
+#include "debug.h"                  // Device header
+#include "Servo.h"
 #include "PWM.h"
-#include "Encoder.h"
-#include "PID_Controller.h"
-#include "DC_Motor.h"
 #include "Camera.h"
-#include "Power.h"
-#include "Data_Central_Process.h"
+#include "OLED.h"
+#include "GPIOSection_Init.h"
+#include "PID.h"
+#include "stdlib.h"
 #include "Timer.h"
-#include "math.h"
-#include  "Filter.h"
+#include "Filter.h"
 
-/************************************************************/
-//全局变量区
+#define Pan_Init 97
+#define Tilt_Init 150
+#define TRUE 1
+#define FALSE 0
 
-     //车载时钟
-    uint64_t Real_Time=0,Real_Time_ms=0,Current_Time=0;
+/* 自定义函数定义区 */
+float Ave(const float *arr, int n);
+void err_store(float *arr, int length, float err_new);
 
-    //Vofa通讯区域
-    uint8_t Received_Data[8];  //蓝牙发出的指令数据
-    float Plot_Data[10]; //通过Vofa传输数据给电脑
-    float watch[8];//检测数据
-    Serial_Election_t Serial_Election;//选择蓝牙串口
-    char Control_Mode='A';
+PID_TypeDef PID_Pan, PID_Tilt;
 
-   //IMU模块
-    IMU_DataSetTypedef IMU_DataSet; //IMU数据包
-    uint8_t IMU_ReceiveData[28]; //IMU传来的反馈数据 由main统一声明
-    Car_State_Tpyedef Car_State;
-    float AngleZ_Store[2]={0}; //对IMU传来数据的储存
+/*数据去毛刺*/
+int cnt_T = 0, cnt_F = 0;                                       // 状态判别计数器                                                                                                      // 运行状态去毛刺
+float ang_err_T_True[2][10] = {0.0};
+/*0 for pan, 1 for tilt*/
 
-   //Camera模块
-    char CameraData[12];//承接Openmv传来的原始数据流 由main函数统一声明；
-    Camera_DataSet_Typedef Camera_DataSet;//解析Openmv得到的数据
-    static float R_Theta[3]={0}; //地面极坐标系 [0]距离 [1]移动偏向角相对于Y轴 [2]朝向
-    float Distance_Store[2]={0};
+/*关键步骤判断标志*/
+int blobs_detect =FALSE;
+uint8_t blobs_detect_last=FALSE;
+int PID_Switch = TRUE;
+uint8_t Change_Flag=FALSE;
 
-    //轮子驱动数据
-    Wheel_Speed_Reference_Typedef Wheel_Speed_Reference; //轮子速度的预期值
-    float Measured_Wheel_RPM[4]; //由Encoder得到的4轮RPM BL=[0] FL=[1] FR=[2] BR=[3] 作为Wheel_Speed_Control的反馈
+/*舵机处理相关*/
+float pan_ang=Pan_Init, tilt_ang=Tilt_Init;
+float pan_ang_delta = 0, tilt_ang_delta = 0;
+// float err_ang[2][3];
 
-    //动力管理
-    Power_Manage_Typedef Power_Select;
+/*
+tilt_ang_delta <- Phi_Error
+pan_ang_delta <- Theta_Error
+*/
 
-    //流程标志区域
-    uint8_t Spin_Flag=0,Rotate_Pause_Flag=0;
+/*串口通信相关*/
+char CameraData[12];
+uint8_t MCU_Cmd;
+float Data2MCU[3];
+Openmv_DataSet_Typedef Openmv_DataSet;
 
+//时钟变量
+uint64_t Real_Time,Real_Time_ms;
+
+//滤波变量
+float Phi_Error_Store[2];
+float Theta_Error_Store[2];
+float Disatance_Store[2];
+
+//计数变量
+uint16_t detect_count=0;
+uint16_t lost_count=0;
+
+//标志位
+uint32_t Fail_Count=0;
+uint8_t Validation_flag=0;
 
 int main(void)
 {
 
-/************************************************************/
-    //main函数的局部变量区
-    int i;
-    static float Velocity_Reference=0,Angular_Reference=0;//所需速度和角速度
+    uint8_t i,j;
 
-/************************************************************/
-    //函数初始化区
     SystemCoreClockUpdate();
     Delay_Init();
-    IMU_Init();
-    Bluetooth_Init();
-    PWM_Init();
-    Encoder_Init();
-    DCMotor_Init();
-    Camera_Init();
-    Power_Manage_Init();
     Clock_Init();
+    PWM_Init();                                                     // PWM输出初始化
+    /* PB8 -> SCL, PB9 -> SDA */
     OLED_Init();
-
-
-
-    while(1)
-    {
-      //静止 等待摄像头初始化完毕
-      while(Real_Time<4)
-
-      OLED_ShowString(1,1,"Preparing...");
-
-/******************************************************************************/
-     //能源管理
-      Power_Select=Power_Wheel;
-      Power_Manage(Power_Select,1);
-
-//    Power_Select=Power_Motor;
-//    Power_Manage(Power_Select,1);
-/******************************************************************************/
-    //命令解析 决定手控还是自控
-    Vofa_Cmd_Analyze(&Control_Mode);
-
-/******************************************************************************/
-    //Openmv
-    CameraData_Process(&Camera_DataSet); //解析摄像头传来的数据
-
-/******************************************************************************/
-    //IMU模块
-    Position_Process(&IMU_DataSet);
-//    State_Resolve(&IMU_DataSet,&Car_State,Real_Time);//给出当前的小车状态
-
-/******************************************************************************/
-    //信号滤波
-    /*
-     * 对输入信号进行滤波处理去除漂移
-     * 但注意的是对航向角的增量及进行滤波处理 消除增量中的静态漂移
-     */
-    AngleZ_Store[0]=AngleZ_Store[1];
-    AngleZ_Store[1]=IMU_DataSet.Angle_Z;
-    IMU_DataSet.Angle_Z+=High_Pass_Filter(Real_Time_ms, Real_Time,(AngleZ_Store[1]-AngleZ_Store[0]),1);
-
-    Distance_Store[0]=Distance_Store[1];
-    Distance_Store[1]=Camera_DataSet.Distance;
-    Camera_DataSet.Distance+=Low_Pass_Filter(Real_Time_ms, Real_Time,(Distance_Store[1]-Distance_Store[0]),0.2);
-
-/******************************************************************************/
-    //数据处理区域
-
-    //模式选择区域
-        if(Control_Mode=='A') //如果是’A‘由MCU自动解算
+    /*舵机角度初始化*/
+    Servo_SetAngle_Pan(Pan_Init);
+    Servo_SetAngle_Tilt(Tilt_Init);
+    Camera_Serial_Init();
+    MCU_Serial_Init();
+//  GPIOA_Init(GPIO_Pin_0,GPIO_Mode_Out_PP);
+    PID_init(0.3,0.0005,0.3,&PID_Pan);
+    PID_init(0.40,0.0005,0.45, &PID_Tilt);
+//    OLED_Clear();
+//    OLED_ShowString(1, 1, "Pan_A:");
+//    OLED_ShowString(2, 1, "Tilt_A:");
+//    OLED_ShowString(3, 1, "Pan_D:");
+//    OLED_ShowString(4, 1, "Tilt_D:");
+        while(TRUE)
         {
-            Camera_Control(R_Theta,&Velocity_Reference,Real_Time,Real_Time_ms,&IMU_DataSet,&Camera_DataSet,&Spin_Flag,&Rotate_Pause_Flag);
-            Rotate_PID_Controller(R_Theta,IMU_DataSet.Angle_Z,&Angular_Reference,Spin_Flag,Rotate_Pause_Flag,0.1,-0.1);
+        /*从OpenMV读取角度数据*/
+        // 检查串口通信参数！
+            CameraData_Process(&Openmv_DataSet);
+            /* blobs_detect 判定 */
+
+            //此处需要对Openmv传来的数据进行滤波处理 传到主机中对信号进行监测
+
+
+            //两级判断  一级判断是否出现黄色  第二级判断是否pass
+
+            //第一层判断，判断是否出现黄色
+            if((Openmv_DataSet.Distance==-1)||(Openmv_DataSet.Phi_Error==-181)||(Openmv_DataSet.Theta_Error == -181))
+            {
+              blobs_detect=FALSE;
+              // GPIO_WriteBit(GPIOA,GPIO_Pin_0,Bit_RESET);
+            }
+            else
+            {
+                detect_count++;
+                if(detect_count>500)
+                {
+                    blobs_detect = TRUE;
+                    detect_count=0;
+                }
+                // GPIO_WriteBit(GPIOA,GPIO_Pin_0,Bit_RESET);
+            }
+
+
+            //突变事件去除之前事件的影响
+            if(blobs_detect_last!=blobs_detect)//判断是否出现、消失小球
+            {
+                Change_Flag=1;
+            }
+            blobs_detect_last=blobs_detect; //储存本次判断
+
+            if(Change_Flag)
+            {
+                for(i=0;i<2;i++)
+                {
+                    for(j=0;j<5;j++)
+                    {
+                        ang_err_T_True[i][j]=0;//当出现突变事件去除上次数据
+                    }
+                }
+                Change_Flag=0;
+            }
+
+
+            //判断数据是否有效
+            if(blobs_detect)
+            {
+                if((Openmv_DataSet.Distance==-2)||(Openmv_DataSet.Phi_Error==-200)||(Openmv_DataSet.Theta_Error == -200))
+                {
+                    Validation_flag=0;
+                }
+                else
+                {
+                    Validation_flag=1;
+                }
+            }
+
+
+
+            if(blobs_detect&&Validation_flag)
+            {
+                cnt_F=0;//清除丢失统计
+
+                //对Openmv传来的数据进行低通滤波波去除高频率噪音
+                Phi_Error_Store[0]=Phi_Error_Store[1];
+                Phi_Error_Store[1]=Openmv_DataSet.Phi_Error;
+
+                Theta_Error_Store[0]=Theta_Error_Store[1];
+                Theta_Error_Store[1]=Openmv_DataSet.Theta_Error;
+
+                Openmv_DataSet.Phi_Error+=Low_Pass_Filter(Real_Time_ms, Real_Time,Phi_Error_Store[1]-Phi_Error_Store[0],0.05);
+                Openmv_DataSet.Theta_Error+=Low_Pass_Filter(Real_Time_ms, Real_Time,Theta_Error_Store[1]-Theta_Error_Store[0],0.05);
+
+                tilt_ang_delta = Openmv_DataSet.Phi_Error;
+                pan_ang_delta = Openmv_DataSet.Theta_Error;
+
+                err_store(ang_err_T_True[0],10, pan_ang_delta);
+                err_store(ang_err_T_True[1],10, tilt_ang_delta);
+
+
+                /*直接控制 or PID控制选择*/
+                if(PID_Switch)
+                {
+                    /* PID角度迭代 */
+                    pan_ang += pid(-Ave(ang_err_T_True[0],10),0,&PID_Pan);
+                    tilt_ang -= pid(-Ave(ang_err_T_True[1],10),0,&PID_Tilt);
+                }
+                else
+                {/*直接控制*/
+                    /* 直接角度迭代 */
+                    pan_ang+=Ave(ang_err_T_True[0], 5);
+                    tilt_ang-=Ave(ang_err_T_True[1], 5);
+                }
+
+                {/* 防锁死 */
+                    if(pan_ang>150)
+                    {
+                        pan_ang=150;
+
+                    }
+                    if(pan_ang<30)
+                    {
+                        pan_ang=30;
+
+                    }
+                    if(tilt_ang<30)
+                    {
+                        tilt_ang=30;
+
+                    }
+                    if(tilt_ang>180)
+                    {
+                        tilt_ang=180;
+
+                    }
+                }
+
+                // 舵机调整Pan, Tilt角度
+                Servo_SetAngle_Pan(pan_ang);
+                Servo_SetAngle_Tilt(tilt_ang);
+                Delay_Ms(100);//注意使用delay使舵机有足够的时间
+
+
+            }
+            else
+            {
+
+                /*计数器判断是否复位，避免反复横跳*/
+                {
+                    cnt_F++;
+                    if(cnt_F==1500)
+                    {
+                        cnt_F = 0;
+                        pan_ang_delta = 0;
+                        tilt_ang_delta = 0;
+                        pan_ang = Pan_Init;
+                        tilt_ang = Tilt_Init;
+                        // 舵机角度调整
+                        Servo_SetAngle_Pan(pan_ang);
+                        Servo_SetAngle_Tilt(tilt_ang);
+                    }
+                }
+
+            }
+
+
+            /* 发送数据包 */
+            {
+                Data2MCU[0] = Openmv_DataSet.Distance;
+                Data2MCU[1] = tilt_ang;
+                Data2MCU[2] = pan_ang;
+                Serial_SendFloat(Data2MCU,3);
+            }
         }
 
-
-        if(Control_Mode=='M')//如果是M由人给指令
-        {
-             Manual_Control(&Velocity_Reference, R_Theta);
-             Spin_Flag=0;
-             Rotate_PID_Controller(R_Theta,IMU_DataSet.Angle_Z,&Angular_Reference,Spin_Flag,Rotate_Pause_Flag,0.628,-0.628);
-
-        }
-
-
-        if(Control_Mode=='S')//紧急制动
-        {
-            Velocity_Reference=0;
-            Angular_Reference=0;
-            Power_Select=Power_Wheel;
-            Power_Manage(Power_Select,0);
-            Spin_Flag=0;
-            Rotate_PID_Controller(R_Theta,IMU_DataSet.Angle_Z,&Angular_Reference,Spin_Flag,Rotate_Pause_Flag,0.628,-0.628); //旋转对应的PID 输入角度Error输出旋转速
-        }
-        else
-        {
-            Power_Select=Power_Wheel;
-            Power_Manage(Power_Select,1);
-        }
-
-
-
-
-
-    //分配速度矩阵
-    Velocity_Distribution(&Wheel_Speed_Reference,&Velocity_Reference,&Angular_Reference,R_Theta,1);//Scale由PID输出
-
-/******************************************************************************/
-    //轮子控制区域
-    Wheel_Speed_Control(&Wheel_Speed_Reference,Measured_Wheel_RPM); //轮子旋转速度的PID控制
-                                                                    //轮子平移速度的PID控制 可以考虑对加速度计进行低通滤波 如果时间允许的情况
-
-/******************************************************************************/
-    //蓝牙通讯处理区
-
-        //获得监视数据
-         if(Control_Mode=='M')
-         {
-             watch[0]=1;
-         }
-         else
-         {
-             watch[0]=2;
-         }
-
-
-         watch[1]=Wheel_Speed_Reference.FR_RPM;
-         watch[2]=Measured_Wheel_RPM[2];
-         watch[3]=*(R_Theta+2);
-         watch[4]=IMU_DataSet.Angle_Z;
-
-        for(i=0;i<4;i++)
-        {
-          *(Plot_Data+i)= *(watch+i);
-        }
-        Serial_Election=Serial3;//蓝牙串口选择
-        Plot(Serial_Election,Plot_Data,4);//无线通讯发送数据
-
-    }
 
 
 }
 
-
-
-/************************************************************/
-//中断函数区 用来产生PWM波
-void TIM2_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast"))); //防止出现只有一次中断
-void TIM2_IRQHandler(void)
+/* 自定义函数定义区 */
+float Ave(const float *arr, int length)
 {
-    if(TIM_GetFlagStatus(TIM2, TIM_FLAG_Update)==1) //获取中断标志
+    int i;
+    float ave_list = 0;
+
+    for(i = 0; i<length; i++)
     {
-       Encoder_Get_Wheel_RPM(Measured_Wheel_RPM);
-       Clear_Encoder();
-       TIM_ClearFlag(TIM2, TIM_FLAG_Update);//清除中断标志
+            ave_list += *(arr+i);
     }
+    ave_list /= length;
+    return ave_list;
 }
+void err_store(float *arr, int length, float err_new)
+{
+    int i;
+    for(i=0; i<length;i++)
+    {
+        arr[i] = arr[i+1];
+    }
+    arr[i-1] = err_new;
+}
+
 
 
 //配置中断函数 用来计时
@@ -228,9 +287,16 @@ void TIM1_UP_IRQHandler(void)
         if(Real_Time_ms==1000)
         {
             Real_Time+=1;
+
+
             Real_Time_ms=0;
         }
         TIM_ClearFlag(TIM1, TIM_FLAG_Update);
     }
 }
+
+
+
+
+
 
