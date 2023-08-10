@@ -1,0 +1,93 @@
+Programme construction
+Serial.c  Usart function However, the set up for usart is in block drivers
+
+Timer
+Timer1
+
+
+IMU
+	USART1(TX-PA9 RX-PA10)
+	DMA->typedef struct{
+    float Angle_X;
+    float Angle_Y;
+    float Angle_Z;
+    float Angular_Speed_X;
+    float Angular_Speed_Y;
+    float Angular_Speed_Z;
+    float Accerelation_X;
+    float Accerelation_Y;
+    float Accerelation_Z;
+	}IMU_DataSetTypedef;
+
+Bluetooth
+	USART3(TX-PB10 RX-PB11)
+	DMA->RX->int8_t Bluetooth_Data[3];
+	DMA->TX->Plot()
+	
+PWM_Output
+	TIM2->PA0 PA1 PA2 PA3 OC Channel
+	PA0 OC1 Front_Left
+	PA1 OC2 Front_Right
+	PA2 OC3 Back_Right
+    PA3 OC4 Back_Left
+   
+
+
+Encoder
+	MotorC BL TIM3 0C1-PA6 0C2-PA7
+	MotorD FL TIM4 OC1-PB6 OC2-PB7
+	MotorA FR TIM8 OC1-PC6 OC2-PC7
+	MotorB BR TIM9 OC-PD9  OC2-PD11
+	typedef struct{uint32_t FL_Speed_Measure;uint32_t FR_Speed_Measure;uint32_t BR_Speed_Measure;uint32_t BL_Speed_Measure;} Measured_Speed_Typedef;
+
+Camera
+	UART4 TX-PC10 RX-PC11
+	
+Motor_Direction
+	BL PD0 PD1
+	FL PD2 PD3
+	FR PD4 PD5
+	BR PD6 PD7
+    typedef struct{int32_t FL_Speed;int32_t FR_Speed;int32_t BR_Speed;int32_t BL_Speed;} Wheel_Speed_Typdef
+    Send to PWM_Output
+    
+    
+SPI
+	SPI2 
+	CLK PB13
+	MISO PB14
+	MOSI PB15
+	OLED_CS PD8
+    W25Qxx_CS PD10
+	OLED_Cmd PD12
+	
+Wheel_Control PC0
+Motor_Control PC2
+
+	
+	
+	
+Control logic construct
+Wheel_Control Section
+   Encode.c->CCR->RPM-Wheel_Speed_Control.c //Feedback
+   Wheel_Speed_Control.c<-PID_Control.c //PID_control
+   Wheel_Speed_Control.c->DC_Motor.c(Direction control)->PWM.c(PWM duty) //Output
+   	
+
+!!!!!!!!!
+出现了程序想让其正转但其输出为反转的情况！
+根据实际接线情况实时调整Set_Motor中的方向控制
+
+
+!!!!!!!!!!!
+函数传递过程中 如果需要用指针进行修改的话 不要传递结构体中某个变量的地址
+	
+	
+Wheel_PID.Kp=0.109267124576902*4;
+Wheel_PID.Ki=0.0108088878485*4;
+Wheel_PID.Kd=-0.01851624170342353*4;
+	
+	
+	
+	
+	
