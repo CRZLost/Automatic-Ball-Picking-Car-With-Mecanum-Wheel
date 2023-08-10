@@ -2,6 +2,7 @@
 This is the key codes for a automatic ball picking car
 The car uses macanum mecanum wheel and have several close-loop control in wheel speed control, car orientation control and ball tracking.
 
+Please pay attention that the uncompressed codes files are in different braches except main brach.
 The codes of the entire car are divided into three parts in different boards.
 The main control codes in CH32V307, charging for the whole control. 
 The vice control codes in CH32V103, charging for tracking the ball with a rotational platform.
